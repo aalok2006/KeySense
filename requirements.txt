@@ -1,5 +1,6 @@
+Flask
 opencv-python
 cvzone
 numpy
-pynput
 mediapipe
+gunicorn  # For running Flask on Render
