@@ -5,12 +5,86 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Virtual Keyboard - Web</title>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin-top: 20px; }
-        #videoContainer { position: relative; width: 640px; height: 480px; border: 1px solid black; }
-        #videoElement { width: 100%; height: 100%; }
-        #overlayCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-        #output { width: 640px; height: 100px; margin-top: 20px; font-size: 1.5em; }
-        .button-info { margin-top: 10px; font-style: italic; }
+        /* General Body Styles */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0; /* Remove default margin */
+            padding-top: 30px; /* Add some padding at the top */
+            background-color: #f0f0f5; /* Light bluish-gray background */
+            color: #333; /* Darker text for contrast */
+            min-height: 100vh; /* Ensure body takes full height */
+            box-sizing: border-box; /* Include padding in element's total width and height */
+        }
+
+        h1 {
+            color: #2c3e50; /* Darker title */
+            margin-bottom: 25px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+        }
+
+        /* Video Container and Canvas */
+        #videoContainer {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border: 2px solid #ccc; /* Softer border */
+            border-radius: 8px; /* Slightly rounded corners */
+            overflow: hidden; /* Hide any overflow */
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+            background-color: #fff; /* White background for the container */
+        }
+
+        #videoElement {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* Ensure video covers the area */
+            transform: scaleX(-1); /* Mirror the video for typical webcam view */
+            position: absolute; /* Position correctly within container */
+        }
+
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Allow clicks to pass through to video if needed, though we'll handle clicks on canvas itself for simulated keys */
+        }
+
+        /* Output Textarea */
+        #output {
+            width: 640px;
+            min-height: 100px;
+            margin-top: 30px;
+            padding: 15px;
+            font-size: 1.4em;
+            border: 2px solid #ccc; /* Softer border */
+            border-radius: 8px;
+            box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.05); /* Inner shadow */
+            resize: vertical; /* Allow vertical resizing */
+            background-color: #fff; /* White background */
+            color: #333;
+            font-family: 'Consolas', 'Monaco', monospace; /* Monospaced font for text output */
+        }
+
+        #output::placeholder {
+            color: #aaa;
+        }
+
+        /* Information Text */
+        .button-info {
+            margin-top: 20px;
+            font-size: 0.95em;
+            color: #666;
+            font-style: italic;
+            text-align: center;
+            max-width: 600px;
+            line-height: 1.5;
+            padding-bottom: 30px; /* Add padding at the bottom for better spacing */
+        }
     </style>
 </head>
 <body>
@@ -21,9 +95,344 @@
     </div>
     <textarea id="output" placeholder="Typed text will appear here..."></textarea>
     <div class="button-info">
-        Click by bringing your index and middle fingers close together over a key.
+        <p><strong>Note:</strong> This demo draws a virtual keyboard and simulates hover/click effects on the canvas. For actual AI hand tracking, you'll integrate the drawing logic within your MediaPipe (or similar) framework.</p>
+        <p>Click by bringing your index and middle fingers close together over a key (or use your mouse to simulate clicks for this demo).</p>
     </div>
 
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const videoElement = document.getElementById('videoElement');
+            const overlayCanvas = document.getElementById('overlayCanvas');
+            const outputTextArea = document.getElementById('output');
+            const ctx = overlayCanvas.getContext('2d');
+
+            let keyboardKeys = [];
+            let currentHoveredKey = null;
+            let currentActiveKey = null; // Key that is currently "pressed"
+
+            // Define Neon Colors
+            const NEON_BASE_COLOR = 'rgba(0, 255, 255, 0.6)';      // Cyan with transparency
+            const NEON_HOVER_COLOR = 'rgba(0, 255, 255, 0.9)';     // Brighter cyan on hover
+            const NEON_PRESS_COLOR = 'rgb(255, 100, 255)';         // Magenta on press
+            const NEON_TEXT_COLOR = '#fff';                        // White text on keys
+
+            // --- Keyboard Layout Definition ---
+            const keyWidth = 60;
+            const keyHeight = 50;
+            const keyMargin = 10;
+            // Center keyboard horizontally, position near bottom
+            const startX = (overlayCanvas.width - (10 * keyWidth + 9 * keyMargin)) / 2;
+            const startY = overlayCanvas.height - 4 * (keyHeight + keyMargin) - 20;
+
+            function setupKeyboardLayout() {
+                const keys = [
+                    ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+                    ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ''],
+                    ['Z', 'X', 'C', 'V', 'B', 'N', 'M', ',', '.', ''],
+                    ['SPACE', 'BACKSPACE']
+                ];
+
+                keyboardKeys = [];
+                let yOffset = 0;
+                keys.forEach((row, rowIndex) => {
+                    let xOffset = 0;
+                    if (rowIndex === 1) xOffset += (keyWidth + keyMargin) / 2; // Offset for ASDF row
+                    if (rowIndex === 2) xOffset += (keyWidth + keyMargin) / 2; // Offset for ZXCV row
+
+                    row.forEach(keyText => {
+                        let currentKeyWidth = keyWidth;
+                        if (keyText === 'SPACE') currentKeyWidth = keyWidth * 5 + keyMargin * 4;
+                        if (keyText === 'BACKSPACE') currentKeyWidth = keyWidth * 2 + keyMargin;
+                        if (keyText === '') return; // Skip empty keys in layout
+
+                        keyboardKeys.push({
+                            char: keyText,
+                            x: startX + xOffset,
+                            y: startY + yOffset,
+                            width: currentKeyWidth,
+                            height: keyHeight,
+                            isHovered: false,
+                            isActive: false
+                        });
+                        xOffset += currentKeyWidth + keyMargin;
+                    });
+                    yOffset += keyHeight + keyMargin;
+                });
+            }
+
+            // --- Drawing Functions ---
+
+            function drawKey(key) {
+                ctx.beginPath();
+                ctx.roundRect(key.x, key.y, key.width, key.height, 8); // Rounded rectangle
+
+                let fillColor = NEON_BASE_COLOR;
+                if (key.isActive) {
+                    fillColor = NEON_PRESS_COLOR;
+                } else if (key.isHovered) {
+                    fillColor = NEON_HOVER_COLOR;
+                }
+                ctx.fillStyle = fillColor;
+                ctx.fill();
+
+                // Add a subtle glow effect (optional, can be performance intensive)
+                ctx.shadowColor = fillColor;
+                ctx.shadowBlur = key.isActive ? 20 : (key.isHovered ? 15 : 10); // More blur on active/hover
+                ctx.shadowOffsetX = 0;
+                ctx.shadowOffsetY = 0;
+
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'; // Lighter border for neon effect
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Reset shadow for text drawing
+                ctx.shadowColor = 'transparent';
+                ctx.shadowBlur = 0;
+
+                ctx.fillStyle = NEON_TEXT_COLOR;
+                ctx.font = `bold ${key.char === 'SPACE' || key.char === 'BACKSPACE' ? '1.1em' : '1.5em'} Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(key.char, key.x + key.width / 2, key.y + key.height / 2);
+            }
+
+            function drawKeyboard() {
+                // Clear only the keyboard area to avoid redrawing the whole canvas if video is playing
+                // For simplicity, we'll clear the whole canvas for this demo.
+                // In a real application with hand tracking, you might clear and redraw just the relevant areas.
+                ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+                keyboardKeys.forEach(key => drawKey(key));
+            }
+
+            // --- Interaction Logic (Simulated for Demo) ---
+
+            function isPointInKey(x, y, key) {
+                return x > key.x && x < key.x + key.width &&
+                       y > key.y && y < key.y + key.height;
+            }
+
+            // Mouse Hover Simulation (for demo purposes)
+            overlayCanvas.addEventListener('mousemove', (event) => {
+                const rect = overlayCanvas.getBoundingClientRect();
+                const mouseX = event.clientX - rect.left;
+                const mouseY = event.clientY - rect.top;
+
+                let foundHovered = false;
+                let redrawNeeded = false;
+
+                for (let i = 0; i < keyboardKeys.length; i++) {
+                    const key = keyboardKeys[i];
+                    if (isPointInKey(mouseX, mouseY, key)) {
+                        if (!key.isHovered) {
+                            key.isHovered = true;
+                            redrawNeeded = true;
+                        }
+                        foundHovered = true;
+                        // Update currentHoveredKey only if it's different
+                        if (currentHoveredKey !== key) {
+                            if (currentHoveredKey) currentHoveredKey.isHovered = false; // Unhover previous
+                            currentHoveredKey = key;
+                            redrawNeeded = true;
+                        }
+                        break;
+                    } else {
+                        if (key.isHovered) {
+                            key.isHovered = false;
+                            redrawNeeded = true;
+                        }
+                    }
+                }
+                // If no key was hovered, and there was a previously hovered key, clear it
+                if (!foundHovered && currentHoveredKey) {
+                    currentHoveredKey.isHovered = false;
+                    currentHoveredKey = null; // Clear reference
+                    redrawNeeded = true;
+                }
+
+                if (redrawNeeded) {
+                    drawKeyboard();
+                }
+            });
+
+            // Mouse Click Simulation (for demo purposes)
+            overlayCanvas.addEventListener('mousedown', (event) => {
+                const rect = overlayCanvas.getBoundingClientRect();
+                const mouseX = event.clientX - rect.left;
+                const mouseY = event.clientY - rect.top;
+
+                for (let i = 0; i < keyboardKeys.length; i++) {
+                    const key = keyboardKeys[i];
+                    if (isPointInKey(mouseX, mouseY, key)) {
+                        key.isActive = true; // Mark as active/pressed
+                        currentActiveKey = key;
+                        drawKeyboard();
+                        typeCharacter(key.char); // Simulate typing
+                        break;
+                    }
+                }
+            });
+
+            overlayCanvas.addEventListener('mouseup', () => {
+                if (currentActiveKey) {
+                    currentActiveKey.isActive = false; // Release active state
+                    currentActiveKey = null;
+                    drawKeyboard();
+                }
+            });
+
+            // Function to simulate typing into the textarea
+            function typeCharacter(char) {
+                if (char === 'SPACE') {
+                    outputTextArea.value += ' ';
+                } else if (char === 'BACKSPACE') {
+                    outputTextArea.value = outputTextArea.value.slice(0, -1);
+                } else {
+                    outputTextArea.value += char;
+                }
+                // Scroll to bottom
+                outputTextArea.scrollTop = outputTextArea.scrollHeight;
+            }
+
+
+            // --- Video Stream Setup ---
+
+            function startVideoStream() {
+                navigator.mediaDevices.getUserMedia({ video: true })
+                    .then(stream => {
+                        videoElement.srcObject = stream;
+                        videoElement.onloadedmetadata = () => {
+                            videoElement.play();
+                            // Set canvas dimensions to match video
+                            overlayCanvas.width = videoElement.videoWidth;
+                            overlayCanvas.height = videoElement.videoHeight;
+                            // Re-setup keyboard layout based on new canvas size
+                            setupKeyboardLayout();
+                            drawKeyboard(); // Initial draw of keyboard
+                        };
+                    })
+                    .catch(err => {
+                        console.error('Error accessing webcam:', err);
+                        alert('Could not start webcam. Please ensure camera access is granted.');
+                        // Fallback: draw keyboard even without video for testing
+                        // Set a default size for canvas if video fails
+                        overlayCanvas.width = 640;
+                        overlayCanvas.height = 480;
+                        setupKeyboardLayout();
+                        drawKeyboard();
+                    });
+            }
+
+            // Initialize
+            startVideoStream();
+
+            // Resize canvas if window resizes (though fixed size for now)
+            window.addEventListener('resize', () => {
+                // In a real responsive app, you'd resize canvas and redraw.
+                // For this fixed 640x480 video/canvas, it's less critical.
+                // If canvas dimensions were to change, setupKeyboardLayout() and drawKeyboard() should be called again.
+            });
+
+            // --- Integration with Real Hand Tracking (Conceptual) ---
+            // If you're using MediaPipe Hands, your drawing loop would look something like this:
+            /*
+            // Assuming 'hands' and 'camera' objects are initialized from MediaPipe setup.
+            // Example:
+            // const hands = new Hands({locateFile: (file) => { ... }});
+            // const camera = new Camera(videoElement, { onFrame: async () => { await hands.send({ image: videoElement }); }});
+            // camera.start();
+
+            hands.onResults((results) => {
+                // Clear the canvas first to draw fresh frames
+                ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+                // Draw hand landmarks if needed
+                // if (results.multiHandLandmarks) {
+                //     for (const landmarks of results.multiHandLandmarks) {
+                //         drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 5 });
+                //         drawLandmarks(ctx, landmarks, { color: '#FF0000', lineWidth: 2 });
+                //     }
+                // }
+
+                // --- HAND TRACKING TO KEYBOARD INTERACTION ---
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const handLandmarks = results.multiHandLandmarks[0]; // Assuming one hand for interaction
+
+                    // 1. Get current index finger tip position (or whatever landmark you use for pointing)
+                    //    Landmarks are normalized (0 to 1), convert to canvas coordinates
+                    const indexFingerTip = handLandmarks[8]; // MediaPipe landmark for index finger tip
+                    const middleFingerTip = handLandmarks[12]; // MediaPipe landmark for middle finger tip
+
+                    const fingerX = indexFingerTip.x * overlayCanvas.width;
+                    const fingerY = indexFingerTip.y * overlayCanvas.height;
+
+                    // 2. Detect hover:
+                    let foundHandHoveredKey = null;
+                    let hoverRedrawNeeded = false;
+
+                    keyboardKeys.forEach(key => {
+                        const isKeyHoveredByHand = isPointInKey(fingerX, fingerY, key);
+                        if (isKeyHoveredByHand) {
+                            foundHandHoveredKey = key;
+                            if (!key.isHovered) {
+                                key.isHovered = true;
+                                hoverRedrawNeeded = true;
+                            }
+                        } else {
+                            if (key.isHovered) {
+                                key.isHovered = false;
+                                hoverRedrawNeeded = true;
+                            }
+                        }
+                    });
+                    // Only redraw if a hover state actually changed
+                    if (hoverRedrawNeeded) {
+                       drawKeyboard();
+                    }
+
+
+                    // 3. Detect "click" gesture (e.g., index and middle finger tips close together)
+                    //    Calculate Euclidean distance between normalized coordinates
+                    const distance = Math.sqrt(
+                        Math.pow(indexFingerTip.x - middleFingerTip.x, 2) +
+                        Math.pow(indexFingerTip.y - middleFingerTip.y, 2)
+                    );
+                    const clickThreshold = 0.04; // Adjust based on your hand model and camera distance
+
+                    // If a key is hovered and the click gesture is detected and it's not already active
+                    if (foundHandHoveredKey && distance < clickThreshold && !foundHandHoveredKey.isActive) {
+                        foundHandHoveredKey.isActive = true; // Mark as pressed
+                        typeCharacter(foundHandHoveredKey.char); // Type character
+                        drawKeyboard(); // Redraw immediately to show press state
+
+                        // Set a timeout to revert active state after a brief moment
+                        setTimeout(() => {
+                            if (foundHandHoveredKey) { // Check if key still exists (it should)
+                                foundHandHoveredKey.isActive = false;
+                                drawKeyboard(); // Redraw to show release state
+                            }
+                        }, 200); // Key stays "pressed" for 200ms
+                    }
+                } else {
+                    // If no hands detected, ensure all keys are not hovered/active
+                    let stateChanged = false;
+                    keyboardKeys.forEach(key => {
+                        if (key.isHovered || key.isActive) {
+                            key.isHovered = false;
+                            key.isActive = false;
+                            stateChanged = true;
+                        }
+                    });
+                    if (stateChanged) {
+                        drawKeyboard();
+                    }
+                }
+
+                // Always draw the keyboard as the last step in the rendering loop
+                drawKeyboard();
+            });
+            */
+        });
+    </script>
 </body>
 </html>
