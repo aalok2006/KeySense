@@ -51,7 +51,7 @@
             left: 0;
             width: 100%;
             height: 100%;
-            pointer-events: none; /* Allow clicks to pass through to video if needed, though we'll handle clicks on canvas itself for simulated keys */
+            /* REMOVED: pointer-events: none; -- We need canvas to capture mouse events */
         }
 
         /* Output Textarea */
@@ -107,7 +107,7 @@
             const ctx = overlayCanvas.getContext('2d');
 
             let keyboardKeys = [];
-            let currentHoveredKey = null;
+            let currentHoveredKey = null; // Key that is currently under the mouse/finger
             let currentActiveKey = null; // Key that is currently "pressed"
 
             // Define Neon Colors
@@ -116,15 +116,60 @@
             const NEON_PRESS_COLOR = 'rgb(255, 100, 255)';         // Magenta on press
             const NEON_TEXT_COLOR = '#fff';                        // White text on keys
 
+            // Animation Constants
+            const ANIM_DURATION_HOVER = 150; // ms for hover/unhover transition
+            const ANIM_DURATION_PRESS = 80;  // ms for press down transition
+            const ANIM_DURATION_RELEASE = 150; // ms for press release transition
+
+            const GLOW_BASE = 10;           // Base glow blur amount
+            const GLOW_HOVER = 18;          // Glow blur on hover
+            const GLOW_PRESS = 25;          // Glow blur on press
+            const GLOW_PULSE_AMOUNT = 5;    // How much the glow pulses from base
+            const GLOW_PULSE_SPEED = 0.002; // How fast the glow pulses (higher for faster)
+
+            const KEY_SCALE_BASE = 1.0;     // Base key scale
+            const KEY_SCALE_PRESS = 0.95;   // Slightly shrink key on press
+            const KEY_SCALE_HOVER = 1.0;    // No scale change on hover by default
+
             // --- Keyboard Layout Definition ---
             const keyWidth = 60;
             const keyHeight = 50;
             const keyMargin = 10;
             // Center keyboard horizontally, position near bottom
-            const startX = (overlayCanvas.width - (10 * keyWidth + 9 * keyMargin)) / 2;
-            const startY = overlayCanvas.height - 4 * (keyHeight + keyMargin) - 20;
+            let startX, startY; // Will be calculated after canvas dimensions are known
+
+            // --- Helper Functions for Animation ---
+
+            // Helper to parse RGBA string to array [r, g, b, a]
+            function parseRgba(rgba) {
+                const parts = rgba.match(/\d+(\.\d+)?/g).map(Number);
+                if (rgba.includes('rgba')) {
+                    return parts.length === 4 ? parts : [parts[0], parts[1], parts[2], 1]; // Default alpha to 1 if missing for rgb()
+                }
+                return [parts[0], parts[1], parts[2], 1]; // For rgb()
+            }
+
+            // Helper to interpolate colors (linear interpolation for each RGBA component)
+            function interpolateRgba(rgba1, rgba2, progress) {
+                const c1 = parseRgba(rgba1);
+                const c2 = parseRgba(rgba2);
+                const r = c1[0] + (c2[0] - c1[0]) * progress;
+                const g = c1[1] + (c2[1] - c1[1]) * progress;
+                const b = c1[2] + (c2[2] - c1[2]) * progress;
+                const a = c1[3] + (c2[3] - c1[3]) * progress;
+                return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a.toFixed(2)})`;
+            }
+
+            // Helper for linear interpolation (for numbers like blur or scale)
+            function lerp(start, end, progress) {
+                return start + (end - start) * progress;
+            }
 
             function setupKeyboardLayout() {
+                // Calculate start positions based on canvas size
+                startX = (overlayCanvas.width - (10 * keyWidth + 9 * keyMargin)) / 2;
+                startY = overlayCanvas.height - 4 * (keyHeight + keyMargin) - 20; // 4 rows + some bottom margin
+
                 const keys = [
                     ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
                     ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ''],
@@ -151,8 +196,25 @@
                             y: startY + yOffset,
                             width: currentKeyWidth,
                             height: keyHeight,
-                            isHovered: false,
-                            isActive: false
+                            isHovered: false, // Tracks if mouse/finger is currently over the key
+                            isActive: false,  // Tracks if the key is currently "pressed"
+
+                            // Animation properties for smooth transitions
+                            _fillColor: NEON_BASE_COLOR,        // Current color being drawn
+                            _targetFillColor: NEON_BASE_COLOR,  // Color to animate towards
+                            _startFillColor: NEON_BASE_COLOR,   // Starting color for current animation
+
+                            _shadowBlur: GLOW_BASE,             // Current glow blur being drawn
+                            _targetShadowBlur: GLOW_BASE,       // Glow blur to animate towards
+                            _startShadowBlur: GLOW_BASE,        // Starting blur for current animation
+
+                            _scale: KEY_SCALE_BASE,             // Current scale being drawn
+                            _targetScale: KEY_SCALE_BASE,       // Scale to animate towards
+                            _startScale: KEY_SCALE_BASE,        // Starting scale for current animation
+
+                            _animationProgress: 1,  // Progress of current animation (0 to 1). 1 means animation complete.
+                            _animationStartTime: 0, // Timestamp when current animation started
+                            _animationDuration: 0,  // Duration of current animation
                         });
                         xOffset += currentKeyWidth + keyMargin;
                     });
@@ -163,21 +225,23 @@
             // --- Drawing Functions ---
 
             function drawKey(key) {
+                ctx.save(); // Save current context state (important for transformations)
+
+                // Translate context to the center of the key, apply scale, then translate back
+                // This ensures scaling happens from the key's center.
+                ctx.translate(key.x + key.width / 2, key.y + key.height / 2);
+                ctx.scale(key._scale, key._scale);
+                ctx.translate(-(key.x + key.width / 2), -(key.y + key.height / 2));
+
                 ctx.beginPath();
                 ctx.roundRect(key.x, key.y, key.width, key.height, 8); // Rounded rectangle
 
-                let fillColor = NEON_BASE_COLOR;
-                if (key.isActive) {
-                    fillColor = NEON_PRESS_COLOR;
-                } else if (key.isHovered) {
-                    fillColor = NEON_HOVER_COLOR;
-                }
-                ctx.fillStyle = fillColor;
+                ctx.fillStyle = key._fillColor;
                 ctx.fill();
 
-                // Add a subtle glow effect (optional, can be performance intensive)
-                ctx.shadowColor = fillColor;
-                ctx.shadowBlur = key.isActive ? 20 : (key.isHovered ? 15 : 10); // More blur on active/hover
+                // Apply glow effect
+                ctx.shadowColor = key._fillColor; // Glow color matches fill
+                ctx.shadowBlur = key._shadowBlur;
                 ctx.shadowOffsetX = 0;
                 ctx.shadowOffsetY = 0;
 
@@ -185,7 +249,7 @@
                 ctx.lineWidth = 1;
                 ctx.stroke();
 
-                // Reset shadow for text drawing
+                // Reset shadow for text drawing (text should not have shadow)
                 ctx.shadowColor = 'transparent';
                 ctx.shadowBlur = 0;
 
@@ -193,69 +257,136 @@
                 ctx.font = `bold ${key.char === 'SPACE' || key.char === 'BACKSPACE' ? '1.1em' : '1.5em'} Arial`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
+                // Text position is automatically centered due to context transformations
                 ctx.fillText(key.char, key.x + key.width / 2, key.y + key.height / 2);
+
+                ctx.restore(); // Restore context state (undoes translate and scale)
             }
 
             function drawKeyboard() {
-                // Clear only the keyboard area to avoid redrawing the whole canvas if video is playing
-                // For simplicity, we'll clear the whole canvas for this demo.
-                // In a real application with hand tracking, you might clear and redraw just the relevant areas.
+                // Clear the entire canvas for each frame.
+                // In a real application with dynamic video, you might optimize this
+                // to only redraw specific areas or use a separate canvas for video.
                 ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-
                 keyboardKeys.forEach(key => drawKey(key));
             }
 
-            // --- Interaction Logic (Simulated for Demo) ---
+            // --- Animation Loop ---
+            let animationFrameId = null; // To store requestAnimationFrame ID
+
+            function updateAnimations(currentTime) {
+                keyboardKeys.forEach(key => {
+                    // Update key's animation properties if an animation is in progress
+                    if (key._animationProgress < 1) {
+                        const elapsed = currentTime - key._animationStartTime;
+                        key._animationProgress = Math.min(1, elapsed / key._animationDuration);
+
+                        key._fillColor = interpolateRgba(key._startFillColor, key._targetFillColor, key._animationProgress);
+                        key._shadowBlur = lerp(key._startShadowBlur, key._targetShadowBlur, key._animationProgress);
+                        key._scale = lerp(key._startScale, key._targetScale, key._animationProgress);
+                    }
+
+                    // Apply pulsating glow for keys that are at their base state
+                    // (not hovered, not active, and no active animation for hover/press/release)
+                    if (!key.isHovered && !key.isActive && key._animationProgress >= 1) {
+                        const pulse = Math.sin(currentTime * GLOW_PULSE_SPEED) * GLOW_PULSE_AMOUNT;
+                        key._shadowBlur = GLOW_BASE + pulse;
+                    }
+                });
+            }
+
+            function renderLoop(currentTime) {
+                updateAnimations(currentTime); // Update all key properties based on current time
+                drawKeyboard(); // Redraw the keyboard with updated properties
+                animationFrameId = requestAnimationFrame(renderLoop); // Continue the loop
+            }
+
+
+            // --- Interaction Logic (Simulated for Demo using Mouse Events) ---
 
             function isPointInKey(x, y, key) {
                 return x > key.x && x < key.x + key.width &&
                        y > key.y && y < key.y + key.height;
             }
 
-            // Mouse Hover Simulation (for demo purposes)
+            // Mouse Hover Simulation
             overlayCanvas.addEventListener('mousemove', (event) => {
                 const rect = overlayCanvas.getBoundingClientRect();
                 const mouseX = event.clientX - rect.left;
                 const mouseY = event.clientY - rect.top;
 
                 let foundHovered = false;
-                let redrawNeeded = false;
 
                 for (let i = 0; i < keyboardKeys.length; i++) {
                     const key = keyboardKeys[i];
                     if (isPointInKey(mouseX, mouseY, key)) {
-                        if (!key.isHovered) {
+                        // If a key is now hovered AND it's not currently active (pressed)
+                        if (!key.isHovered && !key.isActive) {
                             key.isHovered = true;
-                            redrawNeeded = true;
+                            // Start hover animation
+                            key._startFillColor = key._fillColor;
+                            key._targetFillColor = NEON_HOVER_COLOR;
+                            key._startShadowBlur = key._shadowBlur;
+                            key._targetShadowBlur = GLOW_HOVER;
+                            key._startScale = key._scale;
+                            key._targetScale = KEY_SCALE_HOVER;
+                            key._animationStartTime = performance.now();
+                            key._animationDuration = ANIM_DURATION_HOVER;
+                            key._animationProgress = 0;
                         }
                         foundHovered = true;
-                        // Update currentHoveredKey only if it's different
-                        if (currentHoveredKey !== key) {
-                            if (currentHoveredKey) currentHoveredKey.isHovered = false; // Unhover previous
-                            currentHoveredKey = key;
-                            redrawNeeded = true;
+                        // If a new key is hovered, ensure the previously hovered key unhovers (if not active)
+                        if (currentHoveredKey && currentHoveredKey !== key && !currentHoveredKey.isActive) {
+                             currentHoveredKey.isHovered = false;
+                             currentHoveredKey._startFillColor = currentHoveredKey._fillColor;
+                             currentHoveredKey._targetFillColor = NEON_BASE_COLOR;
+                             currentHoveredKey._startShadowBlur = currentHoveredKey._shadowBlur;
+                             currentHoveredKey._targetShadowBlur = GLOW_BASE;
+                             currentHoveredKey._startScale = currentHoveredKey._scale;
+                             currentHoveredKey._targetScale = KEY_SCALE_BASE;
+                             currentHoveredKey._animationStartTime = performance.now();
+                             currentHoveredKey._animationDuration = ANIM_DURATION_HOVER;
+                             currentHoveredKey._animationProgress = 0;
                         }
+                        currentHoveredKey = key; // Update current hovered key
                         break;
                     } else {
-                        if (key.isHovered) {
+                        // If mouse moves off a key, and it was hovered and not active, unhover it
+                        if (key.isHovered && !key.isActive) {
                             key.isHovered = false;
-                            redrawNeeded = true;
+                            // Start unhover animation
+                            key._startFillColor = key._fillColor;
+                            key._targetFillColor = NEON_BASE_COLOR;
+                            key._startShadowBlur = key._shadowBlur;
+                            key._targetShadowBlur = GLOW_BASE;
+                            key._startScale = key._scale;
+                            key._targetScale = KEY_SCALE_BASE;
+                            key._animationStartTime = performance.now();
+                            key._animationDuration = ANIM_DURATION_HOVER;
+                            key._animationProgress = 0;
+                            if (currentHoveredKey === key) { // Clear currentHoveredKey if it's this one
+                                currentHoveredKey = null;
+                            }
                         }
                     }
                 }
-                // If no key was hovered, and there was a previously hovered key, clear it
-                if (!foundHovered && currentHoveredKey) {
+                // If no key is currently hovered, and there was a previous one, unhover it
+                if (!foundHovered && currentHoveredKey && !currentHoveredKey.isActive) {
                     currentHoveredKey.isHovered = false;
-                    currentHoveredKey = null; // Clear reference
-                    redrawNeeded = true;
-                }
-
-                if (redrawNeeded) {
-                    drawKeyboard();
+                    currentHoveredKey._startFillColor = currentHoveredKey._fillColor;
+                    currentHoveredKey._targetFillColor = NEON_BASE_COLOR;
+                    currentHoveredKey._startShadowBlur = currentHoveredKey._shadowBlur;
+                    currentHoveredKey._targetShadowBlur = GLOW_BASE;
+                    currentHoveredKey._startScale = currentHoveredKey._scale;
+                    currentHoveredKey._targetScale = KEY_SCALE_BASE;
+                    currentHoveredKey._animationStartTime = performance.now();
+                    currentHoveredKey._animationDuration = ANIM_DURATION_HOVER;
+                    currentHoveredKey._animationProgress = 0;
+                    currentHoveredKey = null;
                 }
             });
 
-            // Mouse Click Simulation (for demo purposes)
+            // Mouse Click Simulation
             overlayCanvas.addEventListener('mousedown', (event) => {
                 const rect = overlayCanvas.getBoundingClientRect();
                 const mouseX = event.clientX - rect.left;
@@ -264,10 +395,23 @@
                 for (let i = 0; i < keyboardKeys.length; i++) {
                     const key = keyboardKeys[i];
                     if (isPointInKey(mouseX, mouseY, key)) {
-                        key.isActive = true; // Mark as active/pressed
-                        currentActiveKey = key;
-                        drawKeyboard();
-                        typeCharacter(key.char); // Simulate typing
+                        if (!key.isActive) { // Only animate if not already active
+                            key.isActive = true;
+                            currentActiveKey = key; // Keep track of the currently pressed key
+
+                            // Start press animation
+                            key._startFillColor = key._fillColor;
+                            key._targetFillColor = NEON_PRESS_COLOR;
+                            key._startShadowBlur = key._shadowBlur;
+                            key._targetShadowBlur = GLOW_PRESS;
+                            key._startScale = key._scale;
+                            key._targetScale = KEY_SCALE_PRESS;
+                            key._animationStartTime = performance.now();
+                            key._animationDuration = ANIM_DURATION_PRESS;
+                            key._animationProgress = 0;
+
+                            typeCharacter(key.char); // Simulate typing
+                        }
                         break;
                     }
                 }
@@ -275,11 +419,23 @@
 
             overlayCanvas.addEventListener('mouseup', () => {
                 if (currentActiveKey) {
-                    currentActiveKey.isActive = false; // Release active state
-                    currentActiveKey = null;
-                    drawKeyboard();
+                    currentActiveKey.isActive = false;
+                    // Start release animation
+                    currentActiveKey._startFillColor = currentActiveKey._fillColor;
+                    // If still hovered (mouse is over it), animate back to hover state, else to base state
+                    currentActiveKey._targetFillColor = currentActiveKey.isHovered ? NEON_HOVER_COLOR : NEON_BASE_COLOR;
+                    currentActiveKey._startShadowBlur = currentActiveKey._shadowBlur;
+                    currentActiveKey._targetShadowBlur = currentActiveKey.isHovered ? GLOW_HOVER : GLOW_BASE;
+                    currentActiveKey._startScale = currentActiveKey._scale;
+                    currentActiveKey._targetScale = KEY_SCALE_BASE; // Return to normal scale
+                    currentActiveKey._animationStartTime = performance.now();
+                    currentActiveKey._animationDuration = ANIM_DURATION_RELEASE;
+                    currentActiveKey._animationProgress = 0;
+
+                    currentActiveKey = null; // Clear reference
                 }
             });
+
 
             // Function to simulate typing into the textarea
             function typeCharacter(char) {
@@ -308,7 +464,8 @@
                             overlayCanvas.height = videoElement.videoHeight;
                             // Re-setup keyboard layout based on new canvas size
                             setupKeyboardLayout();
-                            drawKeyboard(); // Initial draw of keyboard
+                            // Start the animation loop after setting up the keyboard
+                            animationFrameId = requestAnimationFrame(renderLoop);
                         };
                     })
                     .catch(err => {
@@ -319,18 +476,19 @@
                         overlayCanvas.width = 640;
                         overlayCanvas.height = 480;
                         setupKeyboardLayout();
-                        drawKeyboard();
+                        // Start animation loop even without video
+                        animationFrameId = requestAnimationFrame(renderLoop);
                     });
             }
 
             // Initialize
             startVideoStream();
 
-            // Resize canvas if window resizes (though fixed size for now)
-            window.addEventListener('resize', () => {
-                // In a real responsive app, you'd resize canvas and redraw.
-                // For this fixed 640x480 video/canvas, it's less critical.
-                // If canvas dimensions were to change, setupKeyboardLayout() and drawKeyboard() should be called again.
+            // Clear any pending animation frames if the user navigates away or closes the page
+            window.addEventListener('beforeunload', () => {
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                }
             });
 
             // --- Integration with Real Hand Tracking (Conceptual) ---
@@ -343,93 +501,45 @@
             // camera.start();
 
             hands.onResults((results) => {
-                // Clear the canvas first to draw fresh frames
-                ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+                // Determine hand landmark positions (e.g., index finger tip)
+                // Determine click gestures (e.g., index and middle finger tips close)
 
-                // Draw hand landmarks if needed
-                // if (results.multiHandLandmarks) {
-                //     for (const landmarks of results.multiHandLandmarks) {
-                //         drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 5 });
-                //         drawLandmarks(ctx, landmarks, { color: '#FF0000', lineWidth: 2 });
+                // Update keyboard key states (isHovered, isActive) based on hand data.
+                // This would replace the mousemove/mousedown/mouseup event listeners.
+                // Example:
+                // const indexFingerTip = handLandmarks[8];
+                // const fingerX = indexFingerTip.x * overlayCanvas.width;
+                // const fingerY = indexFingerTip.y * overlayCanvas.height;
+                // for (const key of keyboardKeys) {
+                //     const wasHovered = key.isHovered;
+                //     key.isHovered = isPointInKey(fingerX, fingerY, key);
+                //     if (key.isHovered && !wasHovered && !key.isActive) {
+                //         // Trigger hover animation for key
+                //         // (Similar to mousemove logic in this demo, but for hand tracking)
+                //     } else if (!key.isHovered && wasHovered && !key.isActive) {
+                //         // Trigger unhover animation for key
+                //     }
+
+                //     const isClickGesture = /* logic to detect click gesture */;
+                //     if (key.isHovered && isClickGesture && !key.isActive) {
+                //         key.isActive = true;
+                //         // Trigger press animation
+                //         typeCharacter(key.char);
+                //         // Set a timeout to release the key after a brief moment (e.g., 200ms)
+                //         setTimeout(() => {
+                //             key.isActive = false;
+                //             // Trigger release animation
+                //         }, 200);
                 //     }
                 // }
 
-                // --- HAND TRACKING TO KEYBOARD INTERACTION ---
-                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                    const handLandmarks = results.multiHandLandmarks[0]; // Assuming one hand for interaction
-
-                    // 1. Get current index finger tip position (or whatever landmark you use for pointing)
-                    //    Landmarks are normalized (0 to 1), convert to canvas coordinates
-                    const indexFingerTip = handLandmarks[8]; // MediaPipe landmark for index finger tip
-                    const middleFingerTip = handLandmarks[12]; // MediaPipe landmark for middle finger tip
-
-                    const fingerX = indexFingerTip.x * overlayCanvas.width;
-                    const fingerY = indexFingerTip.y * overlayCanvas.height;
-
-                    // 2. Detect hover:
-                    let foundHandHoveredKey = null;
-                    let hoverRedrawNeeded = false;
-
-                    keyboardKeys.forEach(key => {
-                        const isKeyHoveredByHand = isPointInKey(fingerX, fingerY, key);
-                        if (isKeyHoveredByHand) {
-                            foundHandHoveredKey = key;
-                            if (!key.isHovered) {
-                                key.isHovered = true;
-                                hoverRedrawNeeded = true;
-                            }
-                        } else {
-                            if (key.isHovered) {
-                                key.isHovered = false;
-                                hoverRedrawNeeded = true;
-                            }
-                        }
-                    });
-                    // Only redraw if a hover state actually changed
-                    if (hoverRedrawNeeded) {
-                       drawKeyboard();
-                    }
-
-
-                    // 3. Detect "click" gesture (e.g., index and middle finger tips close together)
-                    //    Calculate Euclidean distance between normalized coordinates
-                    const distance = Math.sqrt(
-                        Math.pow(indexFingerTip.x - middleFingerTip.x, 2) +
-                        Math.pow(indexFingerTip.y - middleFingerTip.y, 2)
-                    );
-                    const clickThreshold = 0.04; // Adjust based on your hand model and camera distance
-
-                    // If a key is hovered and the click gesture is detected and it's not already active
-                    if (foundHandHoveredKey && distance < clickThreshold && !foundHandHoveredKey.isActive) {
-                        foundHandHoveredKey.isActive = true; // Mark as pressed
-                        typeCharacter(foundHandHoveredKey.char); // Type character
-                        drawKeyboard(); // Redraw immediately to show press state
-
-                        // Set a timeout to revert active state after a brief moment
-                        setTimeout(() => {
-                            if (foundHandHoveredKey) { // Check if key still exists (it should)
-                                foundHandHoveredKey.isActive = false;
-                                drawKeyboard(); // Redraw to show release state
-                            }
-                        }, 200); // Key stays "pressed" for 200ms
-                    }
-                } else {
-                    // If no hands detected, ensure all keys are not hovered/active
-                    let stateChanged = false;
-                    keyboardKeys.forEach(key => {
-                        if (key.isHovered || key.isActive) {
-                            key.isHovered = false;
-                            key.isActive = false;
-                            stateChanged = true;
-                        }
-                    });
-                    if (stateChanged) {
-                        drawKeyboard();
-                    }
-                }
-
-                // Always draw the keyboard as the last step in the rendering loop
-                drawKeyboard();
+                // The `updateAnimations` and `renderLoop` functions would then automatically
+                // pick up these state changes and animate the keys smoothly.
+                // You would NOT call requestAnimationFrame here, as the MediaPipe loop
+                // (camera.onFrame or hands.onResults) serves as the rendering loop.
+                // So, you would call `updateAnimations` and `drawKeyboard` directly inside `onResults`.
+                // updateAnimations(performance.now());
+                // drawKeyboard();
             });
             */
         });
